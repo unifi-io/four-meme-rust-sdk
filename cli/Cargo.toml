@@ -1,0 +1,15 @@
+[package]
+name = "four-meme-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+four-meme-sdk = { path = "../" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+eyre = "0.6"
+alloy-primitives = "0.6"
+serde_json = "1.0"
+chrono = "0.4"
+alloy = "1.0.36"
+alloy-signer-local = "1.0.36"

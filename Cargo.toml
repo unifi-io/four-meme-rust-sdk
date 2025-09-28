@@ -1,0 +1,40 @@
+[package]
+name = "four-meme-sdk"
+version = "0.1.5"
+edition = "2021"
+repository = "https://github.com/unifi-io/four-meme-rust-sdk"
+
+[workspace]
+members = [
+    "cli"
+]
+
+[lib]
+name = "four_meme_sdk"
+path = "src/lib.rs"
+
+[features]
+default = ["rustls-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+thiserror = "2.0.16"
+serde_with = { version = "3.14.1", features = ["macros"] }
+serde_path_to_error = "0.1.20"
+async-trait = "0.1.89"
+alloy = "1.0.22"
+# alloy = { version = "1.0.22", features = ["serde"] }
+eyre = "0.6.12"
+futures = "0.3"
+chrono = "0.4.42"
+alloy-signer-local = { version = "1.0.36", features = ["mnemonic", "mnemonic-all-languages"] }
+dirs = "6.0.0"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

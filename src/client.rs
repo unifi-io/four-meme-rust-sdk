@@ -1,0 +1,719 @@
+use crate::{CreateMemeResponse, CreateTokenApiParams, CreateTokenParams, FourMemeEvent, GetTokenInfoByIdResponse};
+use alloy::{
+    hex, primitives::{address, Address, Bytes, FixedBytes, U256}, providers::{DynProvider, Provider, ProviderBuilder}, rpc::types::{Filter, TransactionRequest}, signers::{local::PrivateKeySigner, Signature, Signer}, sol
+};
+use reqwest;
+use futures::StreamExt;
+use tokio::sync::mpsc;
+
+
+
+//pub const FOUR_MEME_CONTRACT_ADDRESS: Address = address!("ec4549cadce5da21df6e6422d448034b5233bfbc");
+pub const FOUR_MEME_CONTRACT_ADDRESS: Address = address!("0x5c952063c7fc8610ffdb798152d69f0b9550762b");
+
+
+sol!(
+    #[sol(rpc)]
+    IFourMeme,
+    "src/abi/four_meme.json"
+);
+
+
+pub struct FourMemeSdk {
+    pub provider: DynProvider,
+    pub address: Address,
+    pub contract: IFourMeme::IFourMemeInstance<DynProvider>,
+    pub four_meme_api_base: String,
+}
+
+impl FourMemeSdk {
+    pub fn new_with_rpc(
+        rpc_url: &str, 
+        signer: PrivateKeySigner,
+        chain_id: u64, 
+        contract_address: Option<Address>,
+        four_meme_api_base: Option<String>,
+    ) -> eyre::Result<Self> {
+        let contract_address = contract_address.unwrap_or(FOUR_MEME_CONTRACT_ADDRESS);
+
+        // signer
+        let signer = signer.with_chain_id(Some(chain_id));
+
+        let provider = ProviderBuilder::new()
+            .wallet(signer)
+            .connect_http(rpc_url.parse()?);
+
+        let provider = DynProvider::new(provider);
+
+
+        let four_meme_api_base = four_meme_api_base.unwrap_or("https://four.meme/meme-api/v1".to_string());
+
+
+        let contract = IFourMeme::new(contract_address, provider.clone());
+        Ok(Self { provider, address: contract_address, contract, four_meme_api_base })
+    }
+
+    pub async fn new_with_provider(
+        provider: DynProvider,
+        contract_address: Option<Address>,
+        four_meme_api_base: Option<String>,
+    ) -> eyre::Result<Self> {
+        let contract_address = contract_address.unwrap_or(FOUR_MEME_CONTRACT_ADDRESS);
+        let contract = IFourMeme::new(contract_address, provider.clone());
+        let four_meme_api_base = four_meme_api_base.unwrap_or("https://four.meme/meme-api/v1".to_string());
+
+        Ok(Self { provider, address: contract_address, contract, four_meme_api_base })
+    }
+}
+
+impl FourMemeSdk {
+    /*
+    pub async fn token_count(&self) -> eyre::Result<U256> {
+        Ok(self.contract._tokenCount().call().await?)
+    }
+
+    pub async fn fee_recipient(&self) -> eyre::Result<Address> {
+        Ok(self.contract._feeRecipient().call().await?)
+    }
+    */
+
+    pub async fn token_info(&self, token: Address) -> eyre::Result<IFourMeme::_tokenInfosReturn> {
+        Ok(self.contract._tokenInfos(token).call().await?)
+    }
+
+    pub async fn add_liquidity(&self, token_address: Address) -> eyre::Result<IFourMeme::addLiquidityReturn> {
+        Ok(self.contract.addLiquidity(token_address).call().await?)
+    }
+
+    pub async fn add_template(
+        &self, 
+        quote: Address, 
+        initial_liquidity: U256,
+        max_raising: U256,
+        total_supply: U256,
+        max_offers: U256,
+        min_trading_fee: U256,
+    ) -> eyre::Result<IFourMeme::addTemplateReturn> {
+        Ok(self.contract.addTemplate(
+            quote,
+            initial_liquidity,
+            max_raising,
+            total_supply,
+            max_offers,
+            min_trading_fee,
+        ).call().await?)
+    }
+    
+    pub async fn buy_token_0(
+        &self,
+        token: Address,
+        to: Address,
+        amount: U256,
+        max_funds: U256,
+    ) -> eyre::Result<IFourMeme::buyToken_0Return> {
+        Ok(self.contract.buyToken_0(token, to, amount, max_funds).call().await?)
+    }
+
+    pub async fn buy_token_1(
+        &self,
+        address: Address,
+        amount: U256,
+        max_funds: U256,    
+    ) -> eyre::Result<IFourMeme::buyToken_1Return> {
+        Ok(self.contract.buyToken_1(address, amount, max_funds).call().await?)
+    }
+
+    pub async fn buy_token_amap_0(
+        &self,
+        token: Address,
+        to: Address,
+        funds: U256,
+        min_amount: U256,
+    ) -> eyre::Result<IFourMeme::buyTokenAMAP_0Return> {
+        Ok(self.contract.buyTokenAMAP_0(token, to, funds, min_amount).call().await?)
+    }
+
+    pub async fn buy_token_amap_1(
+        &self,
+        token: Address,
+        funds: U256,
+        min_amount: U256,
+    ) -> eyre::Result<IFourMeme::buyTokenAMAP_1Return> {
+        Ok(self.contract.buyTokenAMAP_1(token, funds, min_amount).call().await?)
+    }
+
+    pub async fn create_token_0(
+        &self,
+        params: CreateTokenParams,
+        access_token: String,
+        signature: Signature,
+        user_address: Address,
+    ) -> eyre::Result<alloy::primitives::TxHash> {
+        let (tx, _) = self.build_create_token_0_tx(params, access_token, signature, user_address).await?;
+
+        let pending= self.provider.send_transaction(tx).await?;
+        
+        Ok(*pending.tx_hash())
+    }
+
+    pub async fn build_create_token_0_tx(
+        &self,
+        params: CreateTokenParams,
+        access_token: String,
+        signature: Signature,
+        user_address: Address,
+    ) -> eyre::Result<(TransactionRequest, u64)> {   
+        let chain_id = self.provider.get_chain_id().await?;
+        let network = if chain_id == 56 { "BSC" } else { "ETH" };
+
+        let res = self.call_create_token_api(
+            CreateTokenApiParams{
+            access_token: access_token,
+            name: params.name,
+            short_name: params.short_name,
+            desc: params.description,
+            total_supply: params.total_supply.unwrap_or(U256::from(1000000000)),
+            raised_amount: params.raised_amount.unwrap_or(U256::from(24)),
+            pre_sale: params.pre_sale.unwrap_or(U256::from(0)),
+            sale_rate: params.sale_rate.unwrap_or(0.8),
+            signature: signature.to_string(),
+            user_address: user_address.to_string(),
+            img_url: params.img_url,
+            network: network.to_string(),
+        }).await?;
+
+        let args = hex::decode(res.data.create_arg.trim_start_matches("0x")).unwrap().into();
+        let signature = hex::decode(res.data.signature.trim_start_matches("0x")).unwrap().into();
+
+        let calldata = self.contract.createToken_0(args, signature)
+            .calldata()
+            .to_owned();
+        
+        let tx = TransactionRequest::default()
+            .from(user_address)
+            .to(*self.contract.address())
+            .input(calldata.into());
+        
+        Ok((tx, res.data.token_id))
+    }
+
+
+    pub async fn build_signature_message(
+        &self,
+        user_address: Address,
+    ) -> eyre::Result<String> {
+        // Step 1: Get nonce from API
+        let nonce = self.get_nonce(user_address).await?;
+
+        // Return the message to be signed
+        let message = format!("You are sign in Meme {}", nonce);
+        
+        Ok(message)
+    }
+
+    async fn get_nonce(&self, account_address: Address) -> eyre::Result<String> {
+        let chain_id = self.provider.get_chain_id().await?;
+        let network_code = if chain_id == 56 { "BSC" } else { "ETH" };
+
+        let client = reqwest::Client::new();
+        
+        let request_body = serde_json::json!({
+            "accountAddress": account_address,
+            "verifyType": "LOGIN", 
+            "networkCode": network_code
+        });
+
+        let response = client
+            .post(format!("{}/private/user/nonce/generate", self.four_meme_api_base))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json") 
+            .header("origin", "https://four.meme")
+            .header("referer", "https://four.meme/create-token")
+            .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(eyre::eyre!(
+                "Get nonce API request failed with status {}",
+                response.status()
+            ));
+        }
+
+        let nonce_response = response.json::<serde_json::Value>().await?;
+        Ok(nonce_response["data"].as_str().unwrap_or_default().to_string())
+    }
+
+
+    pub async fn get_access_token(
+        &self,
+        signature: Signature, 
+        address: Address,
+    ) -> eyre::Result<String> {
+        let client = reqwest::Client::new();
+
+        let verify_info = serde_json::json!({
+            "signature": signature.to_string(),
+            "address": address, 
+            "networkCode": "BSC",
+            "verifyType": "LOGIN"
+        });
+
+        let request_body = serde_json::json!({
+            "verifyInfo": verify_info
+        });
+
+        let response = client
+            .post(format!("{}/private/user/login/dex", self.four_meme_api_base))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("origin", "https://four.meme")
+            .header("referer", "https://four.meme/create-token")
+            .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(eyre::eyre!(
+                "Get access token API request failed with status {}",
+                response.status()
+            ));
+        }
+
+        let access_token_response = response.json::<serde_json::Value>().await?;
+        Ok(access_token_response["data"].as_str().unwrap_or_default().to_string())
+    }
+  
+       
+
+    async fn call_create_token_api(
+        &self,
+        params: CreateTokenApiParams,
+    ) -> eyre::Result<CreateMemeResponse> {
+        let launch_time = chrono::Utc::now().timestamp_millis();
+
+        let raised_token = serde_json::json!({
+            "symbol": "BNB",
+            "nativeSymbol": "BNB", 
+            "symbolAddress": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+            "deployCost": "0",
+            "buyFee": "0.01",
+            "sellFee": "0.01",
+            "minTradeFee": "0",
+            "b0Amount": "8",
+            "totalBAmount": "24",
+            "totalAmount": "1000000000",
+            "logoUrl": "https://static.four.meme/market/68b871b6-96f7-408c-b8d0-388d804b34275092658264263839640.png",
+            "tradeLevel": ["0.1", "0.5", "1"],
+            "status": "PUBLISH",
+            "buyTokenLink": "https://pancakeswap.finance/swap",
+            "reservedNumber": 10,
+            "saleRate": "0.8",
+            "networkCode": "BSC",
+            "platform": "MEME"
+        });
+
+        let request_body = serde_json::json!({
+            "name": params.name,
+            "shortName": params.short_name,
+            "desc": params.desc,
+            "totalSupply": params.total_supply.to_string(),
+            "raisedAmount": params.raised_amount.to_string(),
+            "saleRate": params.sale_rate.to_string(),
+            "reserveRate": 0,
+            "imgUrl": params.img_url,
+            "raisedToken": raised_token,
+            "launchTime": launch_time,
+            "funGroup": false,
+            "preSale": params.pre_sale.to_string(),
+            "clickFun": false,
+            "symbol": "BNB",
+            "label": "Meme"
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&format!("{}/private/token/create", self.four_meme_api_base))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json") 
+            .header("meme-web-access", params.access_token)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(eyre::eyre!(
+                "Create token API request failed with status {}",
+                response.status()
+            ));
+        }
+
+        let response_bytes = response.bytes().await?;
+        
+        let value: serde_json::Value = serde_json::from_slice(&response_bytes)?;
+        // println!("response json: {}", serde_json::to_string_pretty(&value)?);
+        
+        let response_data: CreateMemeResponse = serde_json::from_value(value)?;
+        Ok(response_data)
+    }
+
+
+    pub async fn create_token_1(
+        &self,
+        args: Bytes,
+    ) -> eyre::Result<IFourMeme::createToken_1Return> {   
+        Ok(self.contract.createToken_1(args).call().await?)
+    }
+
+    pub async fn grant_deployer(
+        &self,
+        account: Address,
+    ) -> eyre::Result<IFourMeme::grantDeployerReturn> {
+        Ok(self.contract.grantDeployer(account).call().await?)
+    }
+
+    pub async fn grant_operator(
+        &self,
+        account: Address,
+    ) -> eyre::Result<IFourMeme::grantOperatorReturn> {
+        Ok(self.contract.grantOperator(account).call().await?)
+    }
+
+    pub async fn grant_role(
+        &self,
+        role: FixedBytes<32>,
+        account: Address,
+    ) -> eyre::Result<IFourMeme::grantRoleReturn> {
+        Ok(self.contract.grantRole(role, account).call().await?)
+    }
+
+    pub async fn initialize_0(
+        &self,
+    ) -> eyre::Result<IFourMeme::initialize_0Return> {
+        Ok(self.contract.initialize_0().call().await?)
+    }
+
+    pub async fn initialize_1(
+        &self,
+        signer: Address,
+        fee_recipient: Address,
+        token_creator: Address,
+        referral_reward_keeper: Address,
+        launch_fee: U256,
+    ) -> eyre::Result<IFourMeme::initialize_1Return> {
+        Ok(self.contract.initialize_1(
+            signer,
+            fee_recipient,
+            token_creator,
+            referral_reward_keeper,
+            launch_fee,
+        ).call().await?)
+    }
+
+
+
+    /*
+    pub async fn calc_last_price(&self, token: Address) -> eyre::Result<U256> {
+        Ok(self.contract.calcLastPrice(token).call().await?)
+    }*/
+
+    // Pure functions: Calculate buy/sell costs using on-chain TokenInfo (local execution, no transaction)
+    /*
+    pub async fn quote_buy_cost(&self, token: Address, amount: U256) -> eyre::Result<U256> {
+        let ti = self.token_info(token).await?;
+        Ok(self.contract._calcBuyCost(ti, amount).call().await?)
+    }
+
+    pub async fn quote_sell_cost(&self, token: Address, amount: U256) -> eyre::Result<U256> {
+        let ti = self.token_info(token).await?;
+        Ok(self.contract._calcSellCost(ti, amount).call().await?)
+    }*/
+
+
+
+
+
+    // ----------------- Write methods: Will send transactions -----------------
+
+    // Buy tokens (payable). `funds` is the amount of native currency (ETH/BNB) sent with the transaction.
+    // Usually you would set `funds <= max_funds`; the chain will validate slippage conditions.
+    /*
+    pub async fn buy_token(
+        &self,
+        params: BuyParams,
+    ) -> eyre::Result<alloy::primitives::TxHash> {
+        let tx = self.build_buy_token_tx(params)?;
+        let pending = self.provider.send_transaction(tx).await?;
+
+        Ok(*pending.tx_hash())
+    }
+
+    pub fn build_buy_token_tx(
+        &self,
+        params: BuyParams,
+    ) -> eyre::Result<TransactionRequest> {
+        let calldata = self
+            .contract
+            .buyToken(params.token, params.amount, params.max_funds)
+            .value(params.funds)
+            .calldata()
+            .to_owned();
+
+        let tx = TransactionRequest::default()
+            .value(params.funds)
+            .input(calldata.into());
+
+        Ok(tx)
+    }*/
+
+    // Sell tokens (non-payable)
+    /*
+    pub async fn sell_token(&self, token: Address, amount: U256) -> eyre::Result<alloy::primitives::TxHash> {
+        let tx = self.contract.saleToken(token, amount).send().await?;
+        Ok(*tx.tx_hash())
+    }
+
+   
+    */
+    // ----------------- Events: Fetch or subscribe -----------------
+
+    // Fetch historical purchase events (can be filtered by block range)
+    /*
+    pub async fn fetch_token_purchases(
+        &self,
+        from_block: Option<u64>,
+        to_block: Option<u64>,
+    ) -> eyre::Result<Vec<IFourMeme::TokenPurchase>> {
+        let mut q = self.contract.TokenPurchase_filter();
+        if let Some(b) = from_block { q = q.from_block(alloy::rpc::types::BlockNumberOrTag::Number(b)); }
+        if let Some(b) = to_block   { q = q.to_block(alloy::rpc::types::BlockNumberOrTag::Number(b)); }
+        let r = q.query().await?;
+        Ok(r.into_iter().map(|(p, _)| p).collect())
+    }
+    */
+    
+    pub async fn get_token_info_by_id(
+        &self,
+        token_id: u64,
+        access_token: String,
+    ) -> eyre::Result<GetTokenInfoByIdResponse> {
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}/private/token/getById", self.four_meme_api_base))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json") 
+            .header("meme-web-access", access_token)
+            .query(&[("id", token_id.to_string())])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(eyre::eyre!(
+                "Get token info API request failed with status {}",
+                response.status()
+            ));
+        }
+        
+        let response_data = response.json::<GetTokenInfoByIdResponse>().await?;
+        Ok(response_data)
+    }
+
+    pub async fn subscribe_events(&self) -> eyre::Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<FourMemeEvent>)> {
+        let token_purchase_filter = self.contract.TokenPurchase_filter().watch().await?;
+        let token_sale_filter = self.contract.TokenSale_filter().watch().await?;
+        let token_created_filter = self.contract.TokenCreate_filter().watch().await?;
+      
+        let mut token_purchase_stream = token_purchase_filter.into_stream();
+        let mut token_sale_stream = token_sale_filter.into_stream();
+        let mut token_created_stream = token_created_filter.into_stream();
+
+        let (tx, rx) = mpsc::channel::<FourMemeEvent>(1024);
+
+        // Use tokio spawn to handle event streams
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(event) = token_purchase_stream.next() => {
+                        if let Ok((purchase_event, _)) = event {
+                            let _ = tx.send(FourMemeEvent::TokenPurchase(purchase_event)).await;
+                        }
+                    }
+                    Some(event) = token_sale_stream.next() => {
+                        if let Ok((sale_event, _)) = event {
+                            let _ = tx.send(FourMemeEvent::TokenSale(sale_event)).await;
+
+                        }
+                    }
+                    Some(event) = token_created_stream.next() => {
+                        if let Ok((created_event, _)) = event {
+                            let _ = tx.send(FourMemeEvent::TokenCreate(created_event)).await;
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+
+        Ok((handle, rx))
+    }
+    
+}
+
+
+#[cfg(test)]
+mod tests {
+    use alloy::hex;
+
+    use super::*;
+
+    fn create_sdk() -> eyre::Result<FourMemeSdk> {
+        let signer = PrivateKeySigner::random();
+        let private_key_hex = format!("0x{}", hex::encode(signer.to_bytes()));
+        let signer = private_key_hex.parse()?;
+        
+
+        let sdk = FourMemeSdk::new_with_rpc(
+            // "https://bsc-dataseed.bnbchain.org", 
+            "https://bsc.blockrazor.xyz", 
+            signer, 
+            56, 
+            Some(FOUR_MEME_CONTRACT_ADDRESS),
+            None,
+        );
+
+        sdk
+    }
+
+    #[tokio::test]
+    async fn test_create_token_0() {
+        let private_key_hex = std::fs::read_to_string(
+            dirs::home_dir()
+                .unwrap()
+                .join(".config/bsc/four_meme_test.txt")
+                .to_str()
+                .unwrap()
+        )
+            .expect("Failed to read private key file")
+            .trim()
+            .to_string();
+        let signer: PrivateKeySigner = private_key_hex.parse()
+            .expect("Invalid private key format");
+
+        println!("Address generated from private key file: {:?}", signer.address());
+
+
+        // let signer = PrivateKeySigner::random();
+        // let private_key_hex = format!("0x{}", hex::encode(signer.to_bytes()));
+        // let signer: PrivateKeySigner = private_key_hex.parse().unwrap();
+
+        let sdk = FourMemeSdk::new_with_rpc(
+            // "https://bsc-dataseed.bnbchain.org", 
+            "https://bsc.blockrazor.xyz", 
+            signer.clone(), 
+            56, 
+            Some(FOUR_MEME_CONTRACT_ADDRESS),
+            None,
+        ).unwrap();
+
+        let balance = sdk.provider.get_balance(signer.address()).await.unwrap();
+        println!("BNB Balance: {} BNB", balance);
+
+        let message = sdk.build_signature_message(signer.address()).await.unwrap();
+        println!("message: {:?}, address: {:?}", message, signer.address());
+        
+        let signature = signer.sign_message(message.as_bytes()).await.unwrap();
+        println!("signature: {:?}", signature.to_string());
+
+        let access_token = sdk.get_access_token(signature, signer.address()).await.unwrap();
+        println!("access_token: {:?}", signature.to_string());
+
+        let (tx_req, token_id) = sdk.build_create_token_0_tx(
+            CreateTokenParams {
+                name: "Aster mama".to_string(),
+                short_name: "aster".to_string(),
+                description: "robot".to_string(),
+                img_url: "https://static.four.meme/market/0ad70de8-3340-455a-ad32-fd9220afbe8d9659231122035551820.jpg".to_string(),
+                total_supply: None,
+                raised_amount: None,
+                sale_rate: None,
+                pre_sale: None,
+            },
+            access_token.clone(),
+            signature, 
+            signer.address()
+        ).await.unwrap();
+
+        let pending = sdk.provider.send_transaction(tx_req).await.unwrap();
+        println!("pending: {:?}", pending.tx_hash());
+
+        let token_info = sdk.get_token_info_by_id(token_id, access_token).await.unwrap();
+        println!("token_info: {:?}", token_info);
+    }
+
+    #[tokio::test]
+    async fn test_add_liquidity() {
+        let sdk = create_sdk().unwrap();
+
+        sdk.add_liquidity("0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap()).await.unwrap();
+
+    }
+
+    #[tokio::test]
+    async fn test_token_info() {
+        let signer = PrivateKeySigner::random();
+        let private_key_hex = format!("0x{}", hex::encode(signer.to_bytes()));
+        let signer = private_key_hex.parse::<PrivateKeySigner>().unwrap();
+        
+
+        let sdk = FourMemeSdk::new_with_rpc(
+            // "https://bsc-dataseed.bnbchain.org", 
+            "https://bsc.blockrazor.xyz", 
+            signer.clone(), 
+            56, 
+            Some(FOUR_MEME_CONTRACT_ADDRESS),
+            None,
+        ).unwrap();
+
+
+        let message = sdk.build_signature_message(signer.address()).await.unwrap();
+        let signature = signer.sign_message(message.as_bytes()).await.unwrap();
+
+        let access_token = sdk.get_access_token(signature, signer.address()).await.unwrap();
+        let token_info_1 = sdk.get_token_info_by_id(100640609, access_token).await.unwrap();
+        println!("token_info_1: {:?}", token_info_1);
+
+        let token_info = sdk.token_info("0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap()).await.unwrap();
+        let launch_time = chrono::DateTime::from_timestamp(token_info.launchTime.to::<i64>(), 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        println!("Launch time: {}, Total supply: {}, Last price: {}", launch_time, token_info.totalSupply, token_info.lastPrice);
+    }
+
+    #[tokio::test]
+    async fn test_buy() {
+        
+        
+        
+        /*
+        let last_price = sdk.last_price("0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap()).await;
+        match last_price {
+            Ok(price) => println!("last_price: {:?}", price),
+            Err(e) => println!("last_price error: {:?}", e),
+        }
+        */
+
+        /*
+        let tx = sdk.purchase_token(BuyParams {
+            token: "0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap(),
+            amount: U256::from(100000),
+            max_funds: U256::from(10000),
+            funds: U256::from(1000),
+        }).await.unwrap();
+
+        println!("tx: {:?}", tx);
+        */
+    }
+}

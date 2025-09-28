@@ -1,0 +1,34 @@
+# Cargo's artifact dir
+target/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+Session.vim
+
+.env
+*.env.*
+
+# MSVC debug files
+*.pdb
+
+# Sometimes convenient to have a tempdir for files not tracked by git
+tmp/
+
+*.pem
+*.key
+*.keystore
+*.jks
+
+*.log
+logs/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Rust specific files
+Cargo.lock
+**/*.rs.bk
