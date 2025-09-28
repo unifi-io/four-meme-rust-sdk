@@ -1,41 +1,34 @@
 
-use alloy::{providers::Provider};
+use alloy::{primitives::{Address, U256}, providers::Provider};
 use clap::Args;
-use four_meme_sdk::{CreateTokenParams, FourMemeEvent, FourMemeSdk};
+use four_meme_sdk::{FourMemeEvent, FourMemeSdk, SellAmapParams};
 use eyre::Result;
 use alloy::{
-    signers::{local::PrivateKeySigner, Signer}
+    signers::local::PrivateKeySigner
 };
 
 #[derive(Args)]
-pub struct CreateTokenArgs {
+pub struct SellTokenArgs {
     /// Private key file path
     #[arg(short, long)]
     private_key_path: String,
 
-    /// Token name
     #[arg(short, long)]
-    name: String,
+    token: Address,
 
-    /// Token symbol
     #[arg(short, long)]
-    short_name: String,
+    amount: U256,
 
-    /// Token description
     #[arg(short, long)]
-    description: String,
-
-    /// Token image URL
-    #[arg(short, long)]
-    img_url: String,
+    min_funds: Option<U256>,
 }
 
-impl CreateTokenArgs {
+impl SellTokenArgs {
     pub async fn execute(&self) -> Result<()> {
-        // Read private key from file
-        let private_key_hex = std::fs::read_to_string(&self.private_key_path)
+         // Read private key from file
+         let private_key_hex = std::fs::read_to_string(&self.private_key_path)
             .map_err(|e| eyre::eyre!("Failed to read private key file {}: {}", self.private_key_path, e))?;
-        
+     
         let private_key_hex = private_key_hex.trim();
         let signer: PrivateKeySigner = private_key_hex.parse()
             .map_err(|e| eyre::eyre!("Invalid private key format: {}", e))?;
@@ -47,35 +40,37 @@ impl CreateTokenArgs {
             None,
             None,
         )?;
-        let cloned_sdk = sdk.clone();
 
         println!("Wallet address: {:?}", signer.address());
 
         let balance = sdk.provider.get_balance(signer.address()).await?;
         println!("BNB balance: {} BNB", balance);
 
-        let message = sdk.build_signature_message(signer.address()).await?;
-        let signature = signer.sign_message(message.as_bytes()).await?;
-        let access_token = sdk.get_access_token(signature, signer.address()).await?;
 
-        let tx_hash = sdk.create_token_0(
-            CreateTokenParams {
-                name: self.name.clone(),
-                short_name: self.short_name.clone(), 
-                description: self.description.clone(),
-                img_url: self.img_url.clone(),
-                total_supply: None,
-                raised_amount: None,
-                sale_rate: None,
-                pre_sale: None,
-            },
-            access_token.clone(),
-            signature,
-            signer.address()
-        ).await?;
+        // Get token info to check if approval is needed
+        let token_info = sdk.token_info(self.token).await?;
+        println!("Token info: base: {:?}, totalSupply: {:?}, funds: {:?}", token_info.base, token_info.totalSupply, token_info.funds);
 
-        println!("Transaction hash: {:?}", tx_hash);
+        // Calculate estimated sell cost
+        let estimated_sell_cost = sdk.calc_sell_cost(token_info.clone(), self.amount).await?;
+        println!("Estimated sell cost: {:?}", estimated_sell_cost);
 
+
+        if let Some(approve_tx) = sdk.build_ensure_allowance_tx(self.token, signer.address(), self.amount).await? {
+            let pending = sdk.provider.send_transaction(approve_tx).await?;
+            println!("approve tx: {:?}", pending.tx_hash());
+
+            loop {
+                if sdk.provider.get_transaction_receipt(*pending.tx_hash()).await?.is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+
+        let tx_hash = sdk.sell_token_amap(SellAmapParams {
+            token: self.token,
+            amount: self.amount,
+            min_funds: self.min_funds,
+        }, signer.address()).await?;
 
         sdk.subscribe_events().await?;
         let (_handle, mut rx) = sdk.subscribe_events().await?;
@@ -92,9 +87,6 @@ impl CreateTokenArgs {
                     }
                     FourMemeEvent::TokenCreate(e) => {
                         println!("TokenCreate event: requestId: {:?}, token: {:?}, launchTime: {:?}, name: {:?}", e.requestId, e.token, e.launchTime, e.name);
-
-                        let token_info = cloned_sdk.get_token_info_by_id(e.requestId, access_token.clone()).await.unwrap();
-                        println!("Token info: {}", serde_json::to_string_pretty(&token_info).unwrap());
                     }
                 }
             }
@@ -110,10 +102,7 @@ impl CreateTokenArgs {
                 break;
             }
         }
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-        println!("Transaction confirmed!");
+        println!("Transaction confirmed!, tx_hash: {:?}", tx_hash);
 
         Ok(())
     }

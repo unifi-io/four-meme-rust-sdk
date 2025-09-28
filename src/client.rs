@@ -1,6 +1,6 @@
-use crate::{CreateMemeResponse, CreateTokenApiParams, CreateTokenParams, FourMemeEvent, GetTokenInfoByIdResponse};
+use crate::{tx_context::TxContext, BuyAmapParams, BuyParams, CreateMemeResponse, CreateTokenApiParams, CreateTokenParams, FourMemeEvent, GetTokenInfoByIdResponse, SellAmapParams, TokenManager3::TokenInfo};
 use alloy::{
-    hex, primitives::{address, Address, Bytes, FixedBytes, U256}, providers::{DynProvider, Provider, ProviderBuilder}, rpc::types::{Filter, TransactionRequest}, signers::{local::PrivateKeySigner, Signature, Signer}, sol
+    hex, primitives::{address, Address, Bytes, FixedBytes, U256}, providers::{DynProvider, Provider, ProviderBuilder}, rpc::types::{TransactionRequest}, signers::{local::PrivateKeySigner, Signature, Signer}, sol
 };
 use reqwest;
 use futures::StreamExt;
@@ -19,6 +19,22 @@ sol!(
 );
 
 
+sol! {
+    #[sol(rpc)]
+    interface IERC20 {
+        function allowance(address owner, address spender) external view returns (uint256);
+        function approve(address spender, uint256 amount) external returns (bool);
+        function balanceOf(address who) external view returns (uint256);
+        function decimals() external view returns (uint8);
+    }
+}
+
+
+
+const MIN_GAS_PRICE_WEI: u128 = 50_000_000;
+
+
+#[derive(Clone)]
 pub struct FourMemeSdk {
     pub provider: DynProvider,
     pub address: Address,
@@ -67,25 +83,32 @@ impl FourMemeSdk {
 }
 
 impl FourMemeSdk {
-    /*
-    pub async fn token_count(&self) -> eyre::Result<U256> {
-        Ok(self.contract._tokenCount().call().await?)
+    pub async fn token_info(&self, token: Address) -> eyre::Result<TokenInfo> {
+        
+        let res = self.contract._tokenInfos(token).call().await?;
+
+        Ok(TokenInfo{
+            base: res.base,
+            quote: res.quote,
+            template: res.template,
+            totalSupply: res.totalSupply,
+            maxOffers: res.maxOffers,
+            maxRaising: res.maxRaising,
+            launchTime: res.launchTime,
+            offers: res.offers,
+            funds: res.funds,
+            lastPrice: res.lastPrice,
+            K: res.K,
+            T: res.T,
+            status: res.status,
+        })
     }
 
-    pub async fn fee_recipient(&self) -> eyre::Result<Address> {
-        Ok(self.contract._feeRecipient().call().await?)
-    }
-    */
-
-    pub async fn token_info(&self, token: Address) -> eyre::Result<IFourMeme::_tokenInfosReturn> {
-        Ok(self.contract._tokenInfos(token).call().await?)
-    }
-
-    pub async fn add_liquidity(&self, token_address: Address) -> eyre::Result<IFourMeme::addLiquidityReturn> {
+    async fn add_liquidity(&self, token_address: Address) -> eyre::Result<IFourMeme::addLiquidityReturn> {
         Ok(self.contract.addLiquidity(token_address).call().await?)
     }
 
-    pub async fn add_template(
+    async fn add_template(
         &self, 
         quote: Address, 
         initial_liquidity: U256,
@@ -104,42 +127,172 @@ impl FourMemeSdk {
         ).call().await?)
     }
     
-    pub async fn buy_token_0(
+    async fn buy_token(
         &self,
-        token: Address,
-        to: Address,
+        params: BuyParams,
+    ) -> eyre::Result<alloy::primitives::TxHash> {
+        let calldata = self.build_buy_token_tx(params.clone()).await?;
+        let ctx = self.fetch_tx_context().await?;
+
+        let tx = TransactionRequest::default()
+            .to(*self.contract.address())
+            .value(params.max_funds)
+            .max_priority_fee_per_gas(ctx.max_priority_fee_per_gas)
+            .max_fee_per_gas(ctx.max_fee_per_gas)
+            .input(calldata.into());
+        
+        let pending = self.provider.send_transaction(tx).await?;
+
+        Ok(*pending.tx_hash())
+    }
+
+    async fn build_buy_token_tx(
+        &self,
+        params: BuyParams,
+    ) -> eyre::Result<Bytes> {
+        let calldata = match params.to {
+            Some(to) => self.contract.buyToken_0(params.token, to, params.amount, params.max_funds)
+                .calldata()
+                .to_owned(),
+            None => self.contract.buyToken_1(params.token, params.amount, params.max_funds)
+                .calldata()
+                .to_owned()
+        };
+
+        Ok(calldata)
+    }
+
+    pub async fn build_ensure_allowance_tx(
+        &self,
+        token: Address,        // 要卖的ERC20地址（通常是 token_info.base）
+        owner: Address,        // 你的地址
+        needed: U256,          // 卖出数量
+    ) -> eyre::Result<Option<TransactionRequest>> {
+        let erc20 = IERC20::new(token, self.provider.clone());
+        let current = erc20.allowance(owner, *self.contract.address()).call().await?;
+
+        if current >= needed {
+            return Ok(None);
+        }
+
+        let calldata = erc20.approve(*self.contract.address(), needed)
+            .calldata()
+            .to_owned();
+
+        let gas_price = self.provider.get_gas_price().await.unwrap_or(MIN_GAS_PRICE_WEI.into());
+
+        let tx = TransactionRequest::default()
+            .from(owner)
+            .to(token)                 
+            .gas_price(gas_price)
+            .input(calldata.into());
+
+        Ok(Some(tx))
+    }
+
+    pub async fn buy_token_amap(
+        &self,
+        params: BuyAmapParams,
+    ) -> eyre::Result<alloy::primitives::TxHash> {
+        let calldata = self.build_buy_token_amap_tx(params.clone()).await?;
+
+        let ctx = self.fetch_tx_context().await?;
+        
+        let tx = TransactionRequest::default()
+            .to(*self.contract.address())
+            .value(params.funds)
+            .max_priority_fee_per_gas(ctx.max_priority_fee_per_gas)
+            .max_fee_per_gas(ctx.max_fee_per_gas)
+            .input(calldata.into());
+
+
+        let pending = self.provider.send_transaction(tx).await?;
+
+        Ok(*pending.tx_hash())    
+    }
+
+
+
+    pub async fn build_buy_token_amap_tx(
+        &self,
+        params: BuyAmapParams,
+    ) -> eyre::Result<Bytes> {
+        let calldata = match params.to {
+            Some(to) => self.contract.buyTokenAMAP_0(params.token, to, params.funds, params.min_amount)
+                .calldata()
+                .to_owned(),
+            None => self.contract.buyTokenAMAP_1(params.token, params.funds, params.min_amount)
+                .calldata()
+                .to_owned()
+        };
+
+        Ok(calldata)
+    }
+
+    pub async fn fetch_tx_context(&self) -> eyre::Result<TxContext> {
+        let min = u128::from(MIN_GAS_PRICE_WEI); // 0.05 gwei
+        let base = self.provider.get_gas_price().await.unwrap_or(min); // Fallback to legacy gas price
+        let max_priority = min.max(u128::from(1_000_000_000u64)); // 1 gwei
+        let max_fee = base * u128::from(2u64) + max_priority;
+
+        Ok(TxContext{
+            max_priority_fee_per_gas: max_priority,
+            max_fee_per_gas: max_fee,
+        }) 
+    }
+
+    pub async fn sell_token_amap(
+        &self,
+        params: SellAmapParams,
+        user_address: Address,
+    ) -> eyre::Result<alloy::primitives::TxHash> {
+        let calldata = self.build_sell_token_amap_calldata(params).await?;
+        let ctx = self.fetch_tx_context().await?;
+
+        let tx = TransactionRequest::default()
+            .to(*self.contract.address())
+            .input(calldata.into())
+            .max_priority_fee_per_gas(ctx.max_priority_fee_per_gas)
+            .max_fee_per_gas(ctx.max_fee_per_gas);
+
+        let pending = self.provider.send_transaction(tx).await?;
+
+        Ok(*pending.tx_hash())    
+    }
+
+    pub async fn calc_sell_cost(
+        &self,
+        token_info: TokenInfo,
         amount: U256,
-        max_funds: U256,
-    ) -> eyre::Result<IFourMeme::buyToken_0Return> {
-        Ok(self.contract.buyToken_0(token, to, amount, max_funds).call().await?)
+    ) -> eyre::Result<alloy::primitives::U256> {
+        Ok(self.contract.calcSellCost(token_info, amount).call().await?)
     }
 
-    pub async fn buy_token_1(
+    pub async fn calc_buy_cost(
         &self,
-        address: Address,
+        token_info: TokenInfo,
         amount: U256,
-        max_funds: U256,    
-    ) -> eyre::Result<IFourMeme::buyToken_1Return> {
-        Ok(self.contract.buyToken_1(address, amount, max_funds).call().await?)
+    ) -> eyre::Result<alloy::primitives::U256> {
+        Ok(self.contract.calcBuyCost(token_info, amount).call().await?)
     }
 
-    pub async fn buy_token_amap_0(
+    pub async fn build_sell_token_amap_calldata(
         &self,
-        token: Address,
-        to: Address,
-        funds: U256,
-        min_amount: U256,
-    ) -> eyre::Result<IFourMeme::buyTokenAMAP_0Return> {
-        Ok(self.contract.buyTokenAMAP_0(token, to, funds, min_amount).call().await?)
-    }
+        params: SellAmapParams,
+    ) -> eyre::Result<Bytes> {
+        let calldata = match params.min_funds {
+            Some(min_funds) => self.contract.sellToken_0(params.token, params.amount, min_funds)
+                    .calldata()
+                    .to_owned()
+            ,
+            None => {
+                self.contract.sellToken_1(params.token, params.amount)
+                .calldata()
+                .to_owned()
+            }
+        };
 
-    pub async fn buy_token_amap_1(
-        &self,
-        token: Address,
-        funds: U256,
-        min_amount: U256,
-    ) -> eyre::Result<IFourMeme::buyTokenAMAP_1Return> {
-        Ok(self.contract.buyTokenAMAP_1(token, funds, min_amount).call().await?)
+        Ok(calldata)
     }
 
     pub async fn create_token_0(
@@ -150,6 +303,11 @@ impl FourMemeSdk {
         user_address: Address,
     ) -> eyre::Result<alloy::primitives::TxHash> {
         let (tx, _) = self.build_create_token_0_tx(params, access_token, signature, user_address).await?;
+
+        let tx = TransactionRequest::default()
+            .from(user_address)
+            .to(*self.contract.address())
+            .input(tx.into());
 
         let pending= self.provider.send_transaction(tx).await?;
         
@@ -162,7 +320,7 @@ impl FourMemeSdk {
         access_token: String,
         signature: Signature,
         user_address: Address,
-    ) -> eyre::Result<(TransactionRequest, u64)> {   
+    ) -> eyre::Result<(Bytes, u64)> {   
         let chain_id = self.provider.get_chain_id().await?;
         let network = if chain_id == 56 { "BSC" } else { "ETH" };
 
@@ -188,13 +346,8 @@ impl FourMemeSdk {
         let calldata = self.contract.createToken_0(args, signature)
             .calldata()
             .to_owned();
-        
-        let tx = TransactionRequest::default()
-            .from(user_address)
-            .to(*self.contract.address())
-            .input(calldata.into());
-        
-        Ok((tx, res.data.token_id))
+                
+        Ok((calldata, res.data.token_id))
     }
 
 
@@ -432,42 +585,6 @@ impl FourMemeSdk {
     }*/
 
 
-
-
-
-    // ----------------- Write methods: Will send transactions -----------------
-
-    // Buy tokens (payable). `funds` is the amount of native currency (ETH/BNB) sent with the transaction.
-    // Usually you would set `funds <= max_funds`; the chain will validate slippage conditions.
-    /*
-    pub async fn buy_token(
-        &self,
-        params: BuyParams,
-    ) -> eyre::Result<alloy::primitives::TxHash> {
-        let tx = self.build_buy_token_tx(params)?;
-        let pending = self.provider.send_transaction(tx).await?;
-
-        Ok(*pending.tx_hash())
-    }
-
-    pub fn build_buy_token_tx(
-        &self,
-        params: BuyParams,
-    ) -> eyre::Result<TransactionRequest> {
-        let calldata = self
-            .contract
-            .buyToken(params.token, params.amount, params.max_funds)
-            .value(params.funds)
-            .calldata()
-            .to_owned();
-
-        let tx = TransactionRequest::default()
-            .value(params.funds)
-            .input(calldata.into());
-
-        Ok(tx)
-    }*/
-
     // Sell tokens (non-payable)
     /*
     pub async fn sell_token(&self, token: Address, amount: U256) -> eyre::Result<alloy::primitives::TxHash> {
@@ -496,7 +613,7 @@ impl FourMemeSdk {
     
     pub async fn get_token_info_by_id(
         &self,
-        token_id: u64,
+        token_id: U256,
         access_token: String,
     ) -> eyre::Result<GetTokenInfoByIdResponse> {
         let client = reqwest::Client::new();
@@ -629,7 +746,7 @@ mod tests {
         let access_token = sdk.get_access_token(signature, signer.address()).await.unwrap();
         println!("access_token: {:?}", signature.to_string());
 
-        let (tx_req, token_id) = sdk.build_create_token_0_tx(
+        let (calldata, token_id) = sdk.build_create_token_0_tx(
             CreateTokenParams {
                 name: "Aster mama".to_string(),
                 short_name: "aster".to_string(),
@@ -645,7 +762,13 @@ mod tests {
             signer.address()
         ).await.unwrap();
 
-        let pending = sdk.provider.send_transaction(tx_req).await.unwrap();
+        let tx = TransactionRequest::default()
+            .from(signer.address())
+            .to(*sdk.contract.address())
+            .input(calldata.into());
+
+
+        let pending = sdk.provider.send_transaction(tx).await.unwrap();
         println!("pending: {:?}", pending.tx_hash());
 
         let token_info = sdk.get_token_info_by_id(token_id, access_token).await.unwrap();
@@ -693,10 +816,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_buy() {
-        
-        
-        
+    async fn test_buy() {    
+        let private_key_hex = std::fs::read_to_string(
+            dirs::home_dir()
+                .unwrap()
+                .join(".config/bsc/four_meme_test.txt")
+                .to_str()
+                .unwrap()
+        )
+            .expect("Failed to read private key file")
+            .trim()
+            .to_string();
+        let signer: PrivateKeySigner = private_key_hex.parse()
+            .expect("Invalid private key format");
+
+        let sdk = FourMemeSdk::new_with_rpc(
+            // "https://bsc-dataseed.bnbchain.org", 
+            "https://bsc.blockrazor.xyz", 
+            signer.clone(), 
+            56, 
+            Some(FOUR_MEME_CONTRACT_ADDRESS),
+            None,
+        ).unwrap();
+
         /*
         let last_price = sdk.last_price("0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap()).await;
         match last_price {
@@ -705,15 +847,13 @@ mod tests {
         }
         */
 
-        /*
-        let tx = sdk.purchase_token(BuyParams {
-            token: "0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap(),
-            amount: U256::from(100000),
-            max_funds: U256::from(10000),
-            funds: U256::from(1000),
+        let tx = sdk.buy_token_amap(BuyAmapParams {
+            token: "0x143a49227f68ce28633724be1b07a0f8e4f34444".parse::<Address>().unwrap(),
+            funds: U256::from(100),
+            min_amount: U256::from(0),
+            to: None,
         }).await.unwrap();
 
         println!("tx: {:?}", tx);
-        */
     }
 }

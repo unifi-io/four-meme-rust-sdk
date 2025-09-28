@@ -18,7 +18,23 @@ pub struct BuyParams {
     pub token: Address,
     pub amount: U256,
     pub max_funds: U256,
+    pub to: Option<Address>,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuyAmapParams {
+    pub token: Address,
     pub funds: U256,
+    pub min_amount: U256,
+    pub to: Option<Address>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SellAmapParams {
+    pub token: Address,
+    pub amount: U256,
+    pub min_funds: Option<U256>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

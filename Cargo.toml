@@ -33,6 +33,8 @@ eyre = "0.6.12"
 futures = "0.3"
 chrono = "0.4.42"
 alloy-signer-local = { version = "1.0.36", features = ["mnemonic", "mnemonic-all-languages"] }
+
+[dev-dependencies]
 dirs = "6.0.0"
 
 [package.metadata.docs.rs]
