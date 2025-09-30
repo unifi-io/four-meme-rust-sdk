@@ -176,9 +176,9 @@ impl FourMemeSdk {
 
     pub async fn build_ensure_allowance_tx(
         &self,
-        token: Address,        // 要卖的ERC20地址（通常是 token_info.base）
-        owner: Address,        // 你的地址
-        needed: U256,          // 卖出数量
+        token: Address,
+        owner: Address,
+        needed: U256,
     ) -> eyre::Result<Option<TransactionRequest>> {
         let erc20 = IERC20::new(token, self.provider.clone());
         let current = erc20.allowance(owner, *self.contract.address()).call().await?;
