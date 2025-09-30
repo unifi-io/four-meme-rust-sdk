@@ -1,6 +1,6 @@
 use crate::{tx_context::TxContext, BuyAmapParams, BuyParams, CreateMemeResponse, CreateTokenApiParams, CreateTokenParams, FourMemeEvent, GetTokenInfoByIdResponse, SellAmapParams, TokenManager3::TokenInfo};
 use alloy::{
-    hex, primitives::{address, Address, Bytes, FixedBytes, U256}, providers::{DynProvider, Provider, ProviderBuilder}, rpc::types::{TransactionRequest}, signers::{local::PrivateKeySigner, Signature, Signer}, sol
+    eips::BlockNumberOrTag, hex, primitives::{address, Address, Bytes, FixedBytes, TxKind, U256}, providers::{DynProvider, Provider, ProviderBuilder}, rpc::types::TransactionRequest, signers::{local::PrivateKeySigner, Signature, Signer}, sol
 };
 use reqwest;
 use futures::StreamExt;
@@ -32,6 +32,18 @@ sol! {
 
 
 const MIN_GAS_PRICE_WEI: u128 = 50_000_000;
+
+
+pub async fn supports_eip1559(provider: &DynProvider) -> eyre::Result<bool> {
+    // 读取 latest 区块，若有 base_fee 则表示节点支持 EIP-1559
+    let blk = provider.get_block_by_number(BlockNumberOrTag::Latest).await?;
+    
+    match blk {
+        Some(b) => Ok(b.header.base_fee_per_gas.is_some()),
+        None => Ok(false),
+    }
+}
+
 
 
 #[derive(Clone)]
@@ -241,19 +253,45 @@ impl FourMemeSdk {
         }) 
     }
 
+    pub async fn get_nonce_1(&self, address: Address) -> eyre::Result<u64> {
+        Ok(self.provider.get_transaction_count(address).await?)
+    }
+
     pub async fn sell_token_amap(
         &self,
         params: SellAmapParams,
         user_address: Address,
     ) -> eyre::Result<alloy::primitives::TxHash> {
         let calldata = self.build_sell_token_amap_calldata(params).await?;
-        let ctx = self.fetch_tx_context().await?;
 
-        let tx = TransactionRequest::default()
+        // let nonce = self.get_nonce_1(user_address).await?;
+
+        let mut tx = TransactionRequest::default()
+            .from(user_address)
             .to(*self.contract.address())
+            .value(U256::from(0))
             .input(calldata.into())
-            .max_priority_fee_per_gas(ctx.max_priority_fee_per_gas)
-            .max_fee_per_gas(ctx.max_fee_per_gas);
+            .gas_limit(500000 * 2);
+
+        let chain_id = self.provider.get_chain_id().await?;
+        let is_bsc = chain_id == 56 || chain_id == 97;
+        let eip1559 = !is_bsc && supports_eip1559(&self.provider).await.unwrap_or(false);
+
+        if eip1559 {
+            // 仅在支持 EIP-1559 的链上设置
+            let ctx = self.fetch_tx_context().await?; // 你已有的 max_fee / max_priority 计算
+            tx = tx
+                .max_priority_fee_per_gas(ctx.max_priority_fee_per_gas)
+                .max_fee_per_gas(ctx.max_fee_per_gas);
+        } else {
+            // BSC 或不支持 EIP-1559 的链：使用 legacy gas_price
+            let gas_price = self
+                .provider
+                .get_gas_price()
+                .await
+                .unwrap_or(5_000_000_000u128);
+            tx = tx.gas_price(gas_price);
+        }
 
         let pending = self.provider.send_transaction(tx).await?;
 
@@ -281,14 +319,101 @@ impl FourMemeSdk {
         params: SellAmapParams,
     ) -> eyre::Result<Bytes> {
         let calldata = match params.min_funds {
-            Some(min_funds) => self.contract.sellToken_0(params.token, params.amount, min_funds)
-                    .calldata()
-                    .to_owned()
-            ,
+            Some(min_funds) => match params.from {
+                Some(from) => {
+                    match params.origin {
+                        Some(origin) => {
+                            match params.fee_rate {
+                                Some(fee_rate) => {
+                                    match params.fee_recipient {
+                                        Some(fee_recipient) => {
+                                            self.contract.sellToken_4(
+                                                origin,
+                                                params.token, 
+                                                from,
+                                                params.amount, 
+                                                min_funds,
+                                                fee_rate,
+                                                fee_recipient)
+                                                    .calldata()
+                                                    .to_owned()
+                                        },
+                                        None => Err(eyre::eyre!("Fee recipient is required when fee rate is provided"))?
+                                    }
+                                },
+                                None => Err(eyre::eyre!("Fee rate is required when fee recipient is provided"))?
+                            }
+                        },
+                        None => Err(eyre::eyre!("Origin is required when from is provided"))?
+                    }
+                },
+                None => {
+                    match params.origin {
+                        Some(origin) => {
+                            match params.fee_rate {
+                                Some(fee_rate) => {
+                                    match params.fee_recipient {
+                                        Some(fee_recipient) => {
+                                            self.contract.sellToken_0(
+                                                origin,
+                                                params.token, 
+                                                params.amount, 
+                                                min_funds,
+                                                fee_rate,
+                                                fee_recipient)
+                                                    .calldata()
+                                                    .to_owned()
+                                        },
+                                        None => Err(eyre::eyre!("Fee recipient is required when fee rate is provided"))?
+                                    }
+                                },
+                                None => {
+                                    self.contract.sellToken_1(
+                                        origin,
+                                        params.token, 
+                                        params.amount,
+                                        min_funds,
+                                    )
+                                        .calldata()
+                                        .to_owned()
+                                }
+                            }
+                        },
+                        None => {
+                            println!("sellToken_3");
+                            self.contract.sellToken_3(
+                                params.token, 
+                                params.amount,
+                                min_funds,
+                            )
+                                .calldata()
+                                .to_owned()
+                        }
+                    }
+                }
+            }
             None => {
-                self.contract.sellToken_1(params.token, params.amount)
-                .calldata()
-                .to_owned()
+                match params.origin {
+                    Some(origin) => {
+                        
+                        self.contract.sellToken_2(
+                            origin,
+                            params.token, 
+                            params.amount
+                        )
+                                .calldata()
+                                .to_owned()
+
+                    },
+                    None => {
+                        self.contract.sellToken_5(
+                            params.token, 
+                            params.amount
+                        )
+                                .calldata()
+                                .to_owned()
+                    }
+                }
             }
         };
 
@@ -320,7 +445,7 @@ impl FourMemeSdk {
         access_token: String,
         signature: Signature,
         user_address: Address,
-    ) -> eyre::Result<(Bytes, u64)> {   
+    ) -> eyre::Result<(Bytes, U256)> {   
         let chain_id = self.provider.get_chain_id().await?;
         let network = if chain_id == 56 { "BSC" } else { "ETH" };
 
@@ -347,7 +472,7 @@ impl FourMemeSdk {
             .calldata()
             .to_owned();
                 
-        Ok((calldata, res.data.token_id))
+        Ok((calldata, U256::from(res.data.token_id)))
     }
 
 
@@ -584,32 +709,6 @@ impl FourMemeSdk {
         Ok(self.contract._calcSellCost(ti, amount).call().await?)
     }*/
 
-
-    // Sell tokens (non-payable)
-    /*
-    pub async fn sell_token(&self, token: Address, amount: U256) -> eyre::Result<alloy::primitives::TxHash> {
-        let tx = self.contract.saleToken(token, amount).send().await?;
-        Ok(*tx.tx_hash())
-    }
-
-   
-    */
-    // ----------------- Events: Fetch or subscribe -----------------
-
-    // Fetch historical purchase events (can be filtered by block range)
-    /*
-    pub async fn fetch_token_purchases(
-        &self,
-        from_block: Option<u64>,
-        to_block: Option<u64>,
-    ) -> eyre::Result<Vec<IFourMeme::TokenPurchase>> {
-        let mut q = self.contract.TokenPurchase_filter();
-        if let Some(b) = from_block { q = q.from_block(alloy::rpc::types::BlockNumberOrTag::Number(b)); }
-        if let Some(b) = to_block   { q = q.to_block(alloy::rpc::types::BlockNumberOrTag::Number(b)); }
-        let r = q.query().await?;
-        Ok(r.into_iter().map(|(p, _)| p).collect())
-    }
-    */
     
     pub async fn get_token_info_by_id(
         &self,
@@ -804,7 +903,7 @@ mod tests {
         let signature = signer.sign_message(message.as_bytes()).await.unwrap();
 
         let access_token = sdk.get_access_token(signature, signer.address()).await.unwrap();
-        let token_info_1 = sdk.get_token_info_by_id(100640609, access_token).await.unwrap();
+        let token_info_1 = sdk.get_token_info_by_id(U256::from(100640609), access_token).await.unwrap();
         println!("token_info_1: {:?}", token_info_1);
 
         let token_info = sdk.token_info("0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap()).await.unwrap();
@@ -848,11 +947,69 @@ mod tests {
         */
 
         let tx = sdk.buy_token_amap(BuyAmapParams {
-            token: "0x143a49227f68ce28633724be1b07a0f8e4f34444".parse::<Address>().unwrap(),
+            token: "0x857076784c8fa3ab66b27c9a4db4814603ab4444".parse::<Address>().unwrap(),
             funds: U256::from(100),
             min_amount: U256::from(0),
             to: None,
         }).await.unwrap();
+
+        println!("tx: {:?}", tx);
+    }
+
+    #[tokio::test]
+    async fn test_sell() {    
+        let private_key_hex = std::fs::read_to_string(
+            dirs::home_dir()
+                .unwrap()
+                .join(".config/bsc/four_meme_test.txt")
+                .to_str()
+                .unwrap()
+        )
+            .expect("Failed to read private key file")
+            .trim()
+            .to_string();
+        let signer: PrivateKeySigner = private_key_hex.parse()
+            .expect("Invalid private key format");
+
+        let sdk = FourMemeSdk::new_with_rpc(
+            // "https://bsc-dataseed.bnbchain.org", 
+            "https://bsc.blockrazor.xyz", 
+            signer.clone(), 
+            56, 
+            Some(FOUR_MEME_CONTRACT_ADDRESS),
+            None,
+        ).unwrap();
+
+        /*
+        let last_price = sdk.last_price("0x3a833aa7c4f1ce660e8dc7f49cfbced4e50d4444".parse::<Address>().unwrap()).await;
+        match last_price {
+            Ok(price) => println!("last_price: {:?}", price),
+            Err(e) => println!("last_price error: {:?}", e),
+        }
+        */
+
+        let token = "0x857076784c8fa3ab66b27c9a4db4814603ab4444".parse::<Address>().unwrap();
+        let amount = "10000000000".parse::<U256>().unwrap();
+
+        if let Some(approve_tx) = sdk.build_ensure_allowance_tx(token, signer.address(), amount).await.unwrap() {
+            let pending = sdk.provider.send_transaction(approve_tx).await.unwrap();
+            println!("approve tx: {:?}", pending.tx_hash());
+
+            loop {
+                if sdk.provider.get_transaction_receipt(*pending.tx_hash()).await.unwrap().is_some() { break; }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+
+        let tx = sdk.sell_token_amap(SellAmapParams {
+            token,
+            amount,
+            min_funds: None,
+            origin: Some(U256::from(0)),
+            from: None,
+            fee_rate: None,
+            fee_recipient: None,
+        }, signer.address()).await.unwrap();
 
         println!("tx: {:?}", tx);
     }

@@ -35,6 +35,10 @@ pub struct SellAmapParams {
     pub token: Address,
     pub amount: U256,
     pub min_funds: Option<U256>,
+    pub origin: Option<U256>,
+    pub from: Option<Address>,
+    pub fee_rate: Option<U256>,
+    pub fee_recipient: Option<Address>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

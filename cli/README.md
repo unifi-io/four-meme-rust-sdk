@@ -28,5 +28,5 @@ cargo run buy-token \
 cargo run sell-token \
     --private-key-path ~/.config/bsc/four_meme_test.txt \
     --token 0x143a49227f68ce28633724be1b07a0f8e4f34444 \
-    --amount 10000
+    --amount 10000000000
 ```

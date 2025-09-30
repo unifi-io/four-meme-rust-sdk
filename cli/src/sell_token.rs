@@ -70,6 +70,10 @@ impl SellTokenArgs {
             token: self.token,
             amount: self.amount,
             min_funds: self.min_funds,
+            from: None,
+            fee_rate: None,
+            fee_recipient: None,
+            origin: None,
         }, signer.address()).await?;
 
         sdk.subscribe_events().await?;
