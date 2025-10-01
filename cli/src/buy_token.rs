@@ -69,7 +69,6 @@ impl BuyTokenArgs {
             to: self.to,
         }).await?;
 
-        sdk.subscribe_events().await?;
         let (_handle, mut rx) = sdk.subscribe_events().await?;
 
         tokio::spawn(async move {
