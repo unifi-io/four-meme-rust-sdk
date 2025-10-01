@@ -829,7 +829,7 @@ mod tests {
             "https://bsc.blockrazor.xyz", 
             signer.clone(), 
             56, 
-            Some(FOUR_MEME_CONTRACT_ADDRESS),
+            None,
             None,
         ).unwrap();
 
