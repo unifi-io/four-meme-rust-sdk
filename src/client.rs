@@ -648,14 +648,6 @@ impl FourMemeSdk {
         Ok(response_data)
     }
 
-
-    pub async fn create_token_1(
-        &self,
-        args: Bytes,
-    ) -> eyre::Result<IFourMeme::createToken_1Return> {   
-        Ok(self.contract.createToken_1(args).call().await?)
-    }
-
     pub async fn grant_deployer(
         &self,
         account: Address,
@@ -866,6 +858,7 @@ mod tests {
                 raised_amount: None,
                 sale_rate: None,
                 pre_sale: None,
+                label: None,
             },
             access_token.clone(),
             signature, 
