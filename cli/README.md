@@ -9,7 +9,8 @@ cargo run create-token \
     --name balana \
     --short-name blll \
     --description "nanana" \
-    --img-url "https://static.four.meme/market/406e4678-9da5-4cff-8da0-8f40fd1874891198309339510750538.png"
+    --img-url "https://static.four.meme/market/406e4678-9da5-4cff-8da0-8f40fd1874891198309339510750538.png" \
+    --label AI
 ```
 
 

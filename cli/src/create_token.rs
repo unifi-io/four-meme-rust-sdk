@@ -1,5 +1,5 @@
 
-use alloy::{providers::Provider};
+use alloy::{primitives::U256, providers::Provider, rpc::types::TransactionRequest};
 use clap::Args;
 use four_meme_sdk::{CreateTokenParams, FourMemeEvent, FourMemeSdk};
 use eyre::Result;
@@ -28,6 +28,12 @@ pub struct CreateTokenArgs {
     /// Token image URL
     #[arg(short, long)]
     img_url: String,
+
+    #[arg(long)]
+    pre_sale: Option<U256>,
+
+    #[arg(long)]
+    label: Option<String>,
 }
 
 impl CreateTokenArgs {
@@ -58,7 +64,7 @@ impl CreateTokenArgs {
         let signature = signer.sign_message(message.as_bytes()).await?;
         let access_token = sdk.get_access_token(signature, signer.address()).await?;
 
-        let tx_hash = sdk.create_token_0(
+        let (tx, token_id) = sdk.build_create_token_0_tx(
             CreateTokenParams {
                 name: self.name.clone(),
                 short_name: self.short_name.clone(), 
@@ -67,14 +73,24 @@ impl CreateTokenArgs {
                 total_supply: None,
                 raised_amount: None,
                 sale_rate: None,
-                pre_sale: None,
+                pre_sale: self.pre_sale,
+                label: self.label.clone(),
             },
             access_token.clone(),
             signature,
             signer.address()
         ).await?;
 
-        println!("Transaction hash: {:?}", tx_hash);
+        let tx = TransactionRequest::default()
+            .from(signer.address())
+            .to(*sdk.contract.address())
+            .input(tx.into());
+
+        let pending= sdk.provider.send_transaction(tx).await?;
+        let tx_hash = *pending.tx_hash();
+
+        println!("Transaction hash: {:?}, token_id: {:?}", tx_hash, token_id);
+
 
 
         sdk.subscribe_events().await?;

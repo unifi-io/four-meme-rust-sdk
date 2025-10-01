@@ -62,7 +62,7 @@ pub struct CreateTokenParams {
     pub raised_amount: Option<U256>,
     pub sale_rate: Option<f64>,
     pub pre_sale: Option<U256>,
-
+    pub label: Option<String>,
 }
 
 
@@ -95,6 +95,7 @@ pub struct CreateTokenApiParams {
     pub network: String,
     pub img_url: String,
     pub pre_sale: U256,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +103,7 @@ pub struct CreateTokenApiParams {
 pub struct CreateMemeResponse {
     pub code: i64,
     pub msg: String,
-    pub data: CreateMemeResponseData,
+    pub data: Option<CreateMemeResponseData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

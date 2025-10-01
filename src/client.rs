@@ -463,16 +463,27 @@ impl FourMemeSdk {
             user_address: user_address.to_string(),
             img_url: params.img_url,
             network: network.to_string(),
+            label: params.label,
         }).await?;
 
-        let args = hex::decode(res.data.create_arg.trim_start_matches("0x")).unwrap().into();
-        let signature = hex::decode(res.data.signature.trim_start_matches("0x")).unwrap().into();
+        if res.code != 0 {
+            return Err(eyre::eyre!("Create token API request failed with status {}", res.msg));
+        }
+
+        if res.data.is_none() {
+            return Err(eyre::eyre!("Create token API request failed with status {}", res.msg));
+        }
+
+        let data = res.data.unwrap();
+
+        let args = hex::decode(data.create_arg.trim_start_matches("0x")).unwrap().into();
+        let signature = hex::decode(data.signature.trim_start_matches("0x")).unwrap().into();
 
         let calldata = self.contract.createToken_0(args, signature)
             .calldata()
             .to_owned();
-                
-        Ok((calldata, U256::from(res.data.token_id)))
+
+        Ok((calldata, U256::from(data.token_id)))
     }
 
 
@@ -608,7 +619,7 @@ impl FourMemeSdk {
             "preSale": params.pre_sale.to_string(),
             "clickFun": false,
             "symbol": "BNB",
-            "label": "Meme"
+            "label": params.label.unwrap_or("Meme".to_string()),
         });
 
         let client = reqwest::Client::new();
@@ -632,7 +643,7 @@ impl FourMemeSdk {
         
         let value: serde_json::Value = serde_json::from_slice(&response_bytes)?;
         // println!("response json: {}", serde_json::to_string_pretty(&value)?);
-        
+
         let response_data: CreateMemeResponse = serde_json::from_value(value)?;
         Ok(response_data)
     }
